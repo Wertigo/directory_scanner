@@ -2,10 +2,11 @@ package main
 
 import (
 	"fmt"
-	"os"
 	"io/ioutil"
-	"sync"
+	"os"
+	"path/filepath"
 	"sort"
+	"sync"
 	"text/tabwriter"
 )
 
@@ -14,80 +15,92 @@ var wg sync.WaitGroup
 func main() {
 	args := os.Args[1:]
 	if len(args) != 1 {
-		fmt.Println("Incorrect args.")
-		fmt.Println("Run example: app.exe C:\\directory")
+		fmt.Println("Incorrect args.\nRun example: app.exe C:\\directory")
 		os.Exit(2)
 	}
 	directory := args[0]
-	if dirInfo, err := os.Stat(directory); os.IsNotExist(err) {
-		fmt.Println("Directory", directory, "not exists")
-	} else {
-		if !dirInfo.IsDir() {
-			fmt.Println(directory, "not a directory")
-		} else {
-			files, err := ioutil.ReadDir(directory)
-			if err != nil {
-				fmt.Println("Error: ", err)
-			} else {
-				wg.Add(len(files))
-				data := make(chan string)
-				for _, file := range files {
-					go getFileInfo(directory, file, data)
-				}
-				go func() {
-					wg.Wait()
-					close(data)
-				}()
-				results := []string{}
-				for message := range data {
-					results = append(results, message)
-				}
-				sort.Strings(results)
-				writer := tabwriter.NewWriter(os.Stdout, 0, 0, 10, ' ', 0)
-				for _, message := range results {
-					fmt.Fprintln(writer, message)
-				}
-				writer.Flush()
-			}
-		}
+	if err := scanDir(directory); err != nil {
+		fmt.Printf("got error: %+v", err)
+		os.Exit(1)
 	}
 }
 
+func scanDir(dir string) error {
+	dirInfo, err := os.Stat(dir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return fmt.Errorf("directory %s not exist", dir)
+		}
+		return fmt.Errorf("failed to get dir %s stat: %+v", dir, err)
+	}
+
+	if !dirInfo.IsDir() {
+		return fmt.Errorf("%s is not a directory", dir)
+	}
+	files, err := ioutil.ReadDir(dir)
+	if err != nil {
+		return fmt.Errorf("failed to read %s dir: %+v", dir, err)
+	}
+	wg.Add(len(files))
+	data := make(chan string)
+	for _, file := range files {
+		go getFileInfo(dir, file, data)
+	}
+	go func() {
+		wg.Wait()
+		close(data)
+	}()
+	results := []string{}
+	for message := range data {
+		results = append(results, message)
+	}
+	sort.Strings(results)
+	writer := tabwriter.NewWriter(os.Stdout, 0, 0, 10, ' ', 0)
+	for _, message := range results {
+		fmt.Fprintln(writer, message)
+	}
+
+	return writer.Flush()
+}
+
 type fileInfo struct {
-	name string
-	size string
+	name        string
+	size        string
 	isDirectory bool
 }
 
 func getFileInfo(baseDirectory string, info os.FileInfo, data chan string) {
 	defer wg.Done()
 	var size int64
+	var err error
 	if info.IsDir() {
-		size = getDirectorySize(baseDirectory, info)
+		size, err = getDirectorySize(baseDirectory, info)
+		if err != nil {
+			fmt.Printf("failed to get Directory size: %+v", err)
+		}
 	} else {
 		size = info.Size()
 	}
 	outData := fileInfo{name: info.Name(), size: formatSizeString(size), isDirectory: info.IsDir()}
 	data <- formatOutString(outData)
 }
-
-func getDirectorySize(baseDirectory string, info os.FileInfo) int64 {
+func getDirectorySize(baseDirectory string, info os.FileInfo) (int64, error) {
 	if info.IsDir() {
 		var size int64
-		files, err := ioutil.ReadDir(baseDirectory + "\\" + info.Name())
+		files, err := ioutil.ReadDir(filepath.Join(baseDirectory, info.Name()))
 		if err != nil {
-			fmt.Println(err)
-			return 0
-		} else {
-			for _, file := range files {
-				size += getDirectorySize(baseDirectory + "\\" + info.Name(), file)
-			}
-
-			return size
+			return 0, fmt.Errorf("failed to read dir: %+v", err)
 		}
-	} else {
-		return info.Size()
+		for _, file := range files {
+			dirSize, err := getDirectorySize(filepath.Join(baseDirectory, info.Name()), file)
+			if err != nil {
+				return 0, err
+			}
+			size += dirSize
+		}
+		return size, nil
 	}
+	return info.Size(), nil
 }
 
 func formatSizeString(size int64) string {
@@ -102,9 +115,8 @@ func formatSizeString(size int64) string {
 	gBytes := mBytes / 1024
 	if gBytes < 1 {
 		return fmt.Sprintf("%d MB", mBytes)
-	} else {
-		return fmt.Sprintf("%d.%d GB", gBytes, mBytes % 1024)
 	}
+	return fmt.Sprintf("%d.%d GB", gBytes, mBytes%1024)
 }
 
 func formatOutString(info fileInfo) string {
